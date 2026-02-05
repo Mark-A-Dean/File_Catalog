@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
-from multiprocessing import Pool, cpu_count
+from functools import lru_cache
+from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Tuple
 import hashlib
 import pandas as pd
 import re
@@ -11,13 +12,14 @@ def row_generator(dataset: List[Tuple]) -> Generator[Dict[str, Any], None, None]
         yield {
             "name": o[0],
             "extension": o[1],
-            "parent": o[2],
-            "date_created": o[3],
-            "date_last_accessed": o[4],
-            "date_last_modified": o[5],
-            "object_type": o[6],
-            "URI": o[7],
-            "hash_id": o[8]
+            "size_KiB": o[2],
+            "parent": o[3],
+            "date_created": o[4],
+            "date_last_accessed": o[5],
+            "date_last_modified": o[6],
+            "object_type": o[7],
+            "URI": o[8],
+            "hash_id": o[9]
         }
 
 def get_file_collection(path: Path) -> List[Path] | None:
@@ -32,23 +34,23 @@ def get_file_collection(path: Path) -> List[Path] | None:
         def __bool__(self):
             return any(re.search(self.__pattern, str(mbr)) for mbr in self)
 
+        def close(self):
+            pass #working on this; it might be used to clean up memory leaks
+
         def print_summary(self):
             print(f"Total items: {len(self)}")
             print(f"Extensions found: {set(f.suffix for f in self)}")
 
-    return FileCollectionWrapper(
-        Path(path).rglob('*')
-    )
+    return FileCollectionWrapper(Path(path).rglob('*'))
 
 def process_file_collection(source_path: Path):
     try:
         file_collection = get_file_collection(path=source_path)
     
-        with Pool() as pool:
-            nbr_procs = Pool(cpu_count())
+        with Pool(maxtasksperchild = 15) as pool:
             df = pd.DataFrame(
                 row_generator(
-                    nbr_procs.imap_unordered(
+                    pool.imap_unordered(
                         FileDetails.get_file_details,
                         file_collection,
                         chunksize = 1000
@@ -61,6 +63,13 @@ def process_file_collection(source_path: Path):
         return None
 
 class FileDetails:
+    MAX_PATH_LENGTH: int = 255
+
+    @staticmethod
+    @lru_cache(maxsize = None)
+    def cached_stat(path: Path):
+        return path.stat()
+
     @staticmethod
     def format_datetime_utc(timestamp: float) -> str:
         return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -70,25 +79,23 @@ class FileDetails:
         return "Directory" if path.is_dir() else "File"
     
     @classmethod
-    def get_file_details(cls, i: Path, 
-        format_datetime_utc: Optional[Callable[[float], str]] = None,
-        obj_type_detector: Optional[Callable[[Path], str]] = None
-    ) -> Tuple:
+    def get_file_details(cls, path: Path) -> Tuple:
+        if len(str(path)) > cls.MAX_PATH_LENGTH:
+            return None #potential for logger action.
 
-        file_stats = i.stat()        
-        format_datetime_utc = format_datetime_utc or cls.format_datetime_utc
-        obj_type_detector = obj_type_detector or cls.obj_type_detector
-        uri = i.as_uri()
+        file_stats = cls.cached_stat(path)
+        uri = path.as_uri()
         hash_id = hashlib.sha256(uri.encode()).hexdigest()
 
         return (
-            i.name,
-            i.suffix,
-            i.parent.stem,
-            format_datetime_utc(file_stats.st_birthtime if hasattr(file_stats, 'st_birthtime') else file_stats.st_birthtime),
-            format_datetime_utc(file_stats.st_atime),
-            format_datetime_utc(file_stats.st_mtime),
-            obj_type_detector(i),
+            path.name,
+            path.suffix,
+            round(path.stat().st_size / 1024,3) if path.is_file() else 0.000,
+            path.parent.stem,
+            cls.format_datetime_utc(file_stats.st_birthtime if hasattr(file_stats, 'st_birthtime') else file_stats.st_birthtime),
+            cls.format_datetime_utc(file_stats.st_atime),
+            cls.format_datetime_utc(file_stats.st_mtime),
+            cls.obj_type_detector(path),
             uri,
             hash_id
         )
