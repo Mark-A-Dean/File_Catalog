@@ -81,7 +81,7 @@ class FileDetails:
     @classmethod
     def get_file_details(cls, path: Path) -> Tuple:
         if len(str(path)) > cls.MAX_PATH_LENGTH:
-            return None #potential for logger action.
+            return (path.name, None, None, None, None, None, None, None, None, None)
 
         file_stats = cls.cached_stat(path)
         uri = path.as_uri()
